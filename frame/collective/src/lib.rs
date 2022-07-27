@@ -42,10 +42,10 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![recursion_limit = "128"]
 
-use sp_std::{prelude::*, result};
+use sp_std::{prelude::*, cmp::PartialOrd, result};
 use sp_core::u32_trait::Value as U32;
 use sp_io::storage;
-use sp_runtime::{RuntimeDebug, traits::Hash};
+use sp_runtime::{RuntimeDebug, traits::{Hash, CheckedSub}};
 
 use frame_support::{
 	codec::{Decode, Encode},
@@ -150,6 +150,10 @@ pub trait Config<I: Instance=DefaultInstance>: frame_system::Config {
 	/// Default vote strategy of this collective.
 	type DefaultVote: DefaultVote;
 
+	/// Defines length of the short proposal in blocks.
+	/// As these proposals were created recently, they require all members to vote in order to be executed.
+	type ShortTimeProposal: Get<Self::BlockNumber>;
+
 	/// Weight information for extrinsics in this pallet.
 	type WeightInfo: WeightInfo;
 }
@@ -181,6 +185,45 @@ pub struct Votes<AccountId, BlockNumber> {
 	nays: Vec<AccountId>,
 	/// The hard end time of this vote.
 	end: BlockNumber,
+}
+
+
+impl<AccountId, BlockNumber> Votes<AccountId, BlockNumber>
+where
+    BlockNumber: CheckedSub<Output = BlockNumber> + PartialOrd + Default,
+{
+	/// Returns threshold for the given proposal based on a system state.
+	/// 
+	/// It might be 
+	/// - the threshold specified when proposal was created if this proposal exists for more than `ShortTimeProposal` blocks
+	/// - amount of current seats if proposal was created recently
+    fn get_threshold<I, T>(&self, seats: MemberCount) -> MemberCount
+    where
+        I: Instance,
+        T: Config<I, BlockNumber = BlockNumber, AccountId = AccountId>,
+    {
+        let current_block = <frame_system::Module<T>>::block_number();
+        let short_proposal_blocks = T::ShortTimeProposal::get();
+
+        let start_block = self.get_start_block::<I, T>();
+
+        if current_block - start_block >= short_proposal_blocks {
+            self.threshold
+        } else {
+            seats
+        }
+    }
+
+	/// Returns block number when proposal for this voting was added.
+    fn get_start_block<I, T>(&self) -> BlockNumber
+    where
+        I: Instance,
+        T: Config<I, BlockNumber = BlockNumber, AccountId = AccountId>,
+    {
+        self.end
+            .checked_sub(&T::MotionDuration::get())
+            .unwrap_or_default()
+    }
 }
 
 decl_storage! {
@@ -619,8 +662,9 @@ decl_module! {
 			let mut no_votes = voting.nays.len() as MemberCount;
 			let mut yes_votes = voting.ayes.len() as MemberCount;
 			let seats = Self::members().len() as MemberCount;
-			let approved = yes_votes >= voting.threshold;
-			let disapproved = seats.saturating_sub(no_votes) < voting.threshold;
+			let threshold = voting.get_threshold::<I, T>(seats);
+			let approved = yes_votes >= threshold;
+			let disapproved = seats.saturating_sub(no_votes) < threshold;
 			// Allow (dis-)approving the proposal as soon as there are enough votes.
 			if approved {
 				let (proposal, len) = Self::validate_and_get_proposal(
@@ -659,7 +703,7 @@ decl_module! {
 				true => yes_votes += abstentions,
 				false => no_votes += abstentions,
 			}
-			let approved = yes_votes >= voting.threshold;
+			let approved = yes_votes >= threshold;
 
 			if approved {
 				let (proposal, len) = Self::validate_and_get_proposal(
@@ -758,7 +802,7 @@ impl<T: Config<I>, I: Instance> Module<T, I> {
 		Self::deposit_event(RawEvent::Approved(proposal_hash));
 
 		let dispatch_weight = proposal.get_dispatch_info().weight;
-		let origin = RawOrigin::Members(voting.threshold, seats).into();
+		let origin = RawOrigin::Members(voting.get_threshold::<I, T>(seats), seats).into();
 		let result = proposal.dispatch(origin);
 		Self::deposit_event(
 			RawEvent::Executed(proposal_hash, result.map(|_| ()).map_err(|e| e.error))
@@ -980,6 +1024,7 @@ mod tests {
 		pub const MaxMembers: u32 = 100;
 		pub BlockWeights: frame_system::limits::BlockWeights =
 			frame_system::limits::BlockWeights::simple_max(1024);
+		pub ShortTimeProposal: <Test as frame_system::Config>::BlockNumber = 5u32.into();
 	}
 	impl frame_system::Config for Test {
 		type BaseCallFilter = ();
@@ -1008,6 +1053,7 @@ mod tests {
 	impl Config<Instance1> for Test {
 		type Origin = Origin;
 		type Proposal = Call;
+		type ShortTimeProposal = ShortTimeProposal;
 		type Event = Event;
 		type MotionDuration = MotionDuration;
 		type MaxProposals = MaxProposals;
@@ -1018,6 +1064,7 @@ mod tests {
 	impl Config<Instance2> for Test {
 		type Origin = Origin;
 		type Proposal = Call;
+		type ShortTimeProposal = ShortTimeProposal;
 		type Event = Event;
 		type MotionDuration = MotionDuration;
 		type MaxProposals = MaxProposals;
@@ -1028,6 +1075,7 @@ mod tests {
 	impl Config for Test {
 		type Origin = Origin;
 		type Proposal = Call;
+		type ShortTimeProposal = ShortTimeProposal;
 		type Event = Event;
 		type MotionDuration = MotionDuration;
 		type MaxProposals = MaxProposals;
@@ -1634,6 +1682,8 @@ mod tests {
 			let hash: H256 = proposal.blake2_256().into();
 			assert_ok!(Collective::propose(Origin::signed(1), 2, Box::new(proposal.clone()), proposal_len));
 			assert_ok!(Collective::vote(Origin::signed(2), hash.clone(), 0, true));
+
+			System::set_block_number(6);
 			assert_ok!(Collective::close(Origin::signed(2), hash.clone(), 0, proposal_weight, proposal_len));
 
 			assert_eq!(System::events(), vec![
@@ -1696,6 +1746,7 @@ mod tests {
 			assert_ok!(Collective::propose(Origin::signed(1), 2, Box::new(proposal.clone()), proposal_len));
 			// First we make the proposal succeed
 			assert_ok!(Collective::vote(Origin::signed(2), hash.clone(), 0, true));
+			System::set_block_number(6);
 			// It will not close with bad weight/len information
 			assert_noop!(
 				Collective::close(Origin::signed(2), hash.clone(), 0, 0, 0),
