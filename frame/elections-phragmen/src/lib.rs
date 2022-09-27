@@ -110,7 +110,7 @@ use frame_support::{
 use scale_info::TypeInfo;
 use sp_npos_elections::{ElectionResult, ExtendedBalance};
 use sp_runtime::{
-	traits::{Saturating, StaticLookup, Zero, CheckedSub},
+	traits::{CheckedSub, Saturating, StaticLookup, Zero},
 	DispatchError, Perbill, RuntimeDebug,
 };
 use sp_std::{cmp::Ordering, prelude::*};
@@ -145,10 +145,10 @@ pub enum Renouncing {
 /// Defines storage version.
 #[derive(Encode, Decode, PartialEq, Eq, scale_info::TypeInfo)]
 pub enum PalletStorageVersion {
-    /// Initial version of the storage.
-    Initial,
-    /// Support candidacy delay.
-    CandidacyDelay,
+	/// Initial version of the storage.
+	Initial,
+	/// Support candidacy delay.
+	CandidacyDelay,
 }
 
 impl Default for PalletStorageVersion {
@@ -301,14 +301,16 @@ pub mod pallet {
 		}
 
 		fn on_runtime_upgrade() -> Weight {
-            T::DbWeight::get().reads(1) + if Self::version() == PalletStorageVersion::Initial {
-                <Version<T>>::put(PalletStorageVersion::CandidacyDelay);
+			T::DbWeight::get().reads(1) +
+				if Self::version() == PalletStorageVersion::Initial {
+					<Version<T>>::put(PalletStorageVersion::CandidacyDelay);
 
-                migrations::candidacy_delay::migrate_to_candidacy_delay::<T>() + T::DbWeight::get().writes(1)
-            } else {
-                0
-            }
-        }
+					migrations::candidacy_delay::migrate_to_candidacy_delay::<T>() +
+						T::DbWeight::get().writes(1)
+				} else {
+					0
+				}
+		}
 	}
 
 	#[pallet::call]
@@ -443,7 +445,12 @@ pub mod pallet {
 			T::Currency::reserve(&who, T::CandidacyBond::get())
 				.map_err(|_| Error::<T>::InsufficientCandidateFunds)?;
 
-			<Candidates<T>>::mutate(|c| c.insert(index, (who, T::CandidacyBond::get(), <frame_system::Pallet<T>>::block_number())));
+			<Candidates<T>>::mutate(|c| {
+				c.insert(
+					index,
+					(who, T::CandidacyBond::get(), <frame_system::Pallet<T>>::block_number()),
+				)
+			});
 			Ok(None.into())
 		}
 
@@ -674,7 +681,8 @@ pub mod pallet {
 	/// Invariant: Always sorted based on account id.
 	#[pallet::storage]
 	#[pallet::getter(fn candidates)]
-	pub type Candidates<T: Config> = StorageValue<_, Vec<(T::AccountId, BalanceOf<T>, T::BlockNumber)>, ValueQuery>;
+	pub type Candidates<T: Config> =
+		StorageValue<_, Vec<(T::AccountId, BalanceOf<T>, T::BlockNumber)>, ValueQuery>;
 
 	/// The total number of vote rounds that have happened, excluding the upcoming one.
 	#[pallet::storage]
@@ -934,21 +942,21 @@ impl<T: Config> Pallet<T> {
 		let desired_runners_up = T::DesiredRunnersUp::get() as usize;
 		let num_to_elect = desired_runners_up + desired_seats;
 		let max_candidate_submission_block =
-            <frame_system::Pallet<T>>::block_number().checked_sub(&T::CandidacyDelay::get());
+			<frame_system::Pallet<T>>::block_number().checked_sub(&T::CandidacyDelay::get());
 
 		let candidates_and_deposit: Vec<_> = max_candidate_submission_block
-            .map(|max_added_at_block| {
-                Self::candidates().into_iter().filter_map(
-                    move |(candidate, deposit, added_at_block)| {
-                        (added_at_block <= max_added_at_block).then(|| (candidate, deposit))
-                    },
-                )
-            })
-            .into_iter()
-            .flatten()
-            // add all the previous members and runners-up as candidates as well.
-            .chain(Self::implicit_candidates_with_deposit())
-            .collect();
+			.map(|max_added_at_block| {
+				Self::candidates().into_iter().filter_map(
+					move |(candidate, deposit, added_at_block)| {
+						(added_at_block <= max_added_at_block).then(|| (candidate, deposit))
+					},
+				)
+			})
+			.into_iter()
+			.flatten()
+			// add all the previous members and runners-up as candidates as well.
+			.chain(Self::implicit_candidates_with_deposit())
+			.collect();
 
 		if candidates_and_deposit.len().is_zero() {
 			Self::deposit_event(Event::EmptyTerm);
@@ -1752,7 +1760,10 @@ mod tests {
 
 			assert_ok!(submit_candidacy(Origin::signed(4)));
 			assert_ok!(vote(Origin::signed(4), vec![4], 40));
-			assert_eq!(Elections::candidates(), vec![(4, 4, System::block_number()), (5, 3, System::block_number())]);
+			assert_eq!(
+				Elections::candidates(),
+				vec![(4, 4, System::block_number()), (5, 3, System::block_number())]
+			);
 
 			// once elected, they each hold their candidacy bond, no more.
 			System::set_block_number(5);
@@ -2292,44 +2303,37 @@ mod tests {
 		});
 	}
 
-    #[test]
-    fn candidacy_delay() {
-        ExtBuilder::default().build_and_execute(|| {
-            System::set_block_number(2);
-            assert_ok!(submit_candidacy(Origin::signed(4)));
-            assert_ok!(vote(Origin::signed(4), vec![4], 40));
+	#[test]
+	fn candidacy_delay() {
+		ExtBuilder::default().build_and_execute(|| {
+			System::set_block_number(2);
+			assert_ok!(submit_candidacy(Origin::signed(4)));
+			assert_ok!(vote(Origin::signed(4), vec![4], 40));
 
-            System::set_block_number(3);
-            Elections::do_phragmen();
+			System::set_block_number(3);
+			Elections::do_phragmen();
 
-            assert_eq!(Elections::members(), vec![]);
-            assert_eq!(
-                System::events().iter().last().unwrap().event,
-                Event::Elections(super::Event::EmptyTerm)
-            );
+			assert_eq!(Elections::members(), vec![]);
+			assert_eq!(
+				System::events().iter().last().unwrap().event,
+				Event::Elections(super::Event::EmptyTerm)
+			);
 
-            System::set_block_number(5);
-            Elections::do_phragmen();
+			System::set_block_number(5);
+			Elections::do_phragmen();
 
-            assert_eq!(Elections::members(), vec![]);
-            assert_eq!(
-                System::events().iter().last().unwrap().event,
-                Event::Elections(super::Event::EmptyTerm)
-            );
+			assert_eq!(Elections::members(), vec![]);
+			assert_eq!(
+				System::events().iter().last().unwrap().event,
+				Event::Elections(super::Event::EmptyTerm)
+			);
 
-            System::set_block_number(6);
-            Elections::do_phragmen();
+			System::set_block_number(6);
+			Elections::do_phragmen();
 
-            assert_eq!(
-                Elections::members(),
-                vec![SeatHolder {
-                    who: 4,
-                    stake: 35,
-                    deposit: 3
-                }]
-            );
-        });
-    }
+			assert_eq!(Elections::members(), vec![SeatHolder { who: 4, stake: 35, deposit: 3 }]);
+		});
+	}
 
 	#[test]
 	fn defunct_voter_will_be_counted() {
